@@ -1,0 +1,172 @@
+/**
+ * Core Philosophy: This ruleset enforces a strict "User Profile Ownership" security model.
+ * Each user, regardless of their type (Farmer, Vendor, etc.), can only create, view, and
+ * modify their own profile document. The document ID for a user's profile MUST match their
+ * Firebase Authentication UID.
+ *
+ * Data Structure: The data is organized into flat, top-level collections based on user
+ * type (e.g., /farmers, /vendors). This segregates data cleanly. A /user_credentials
+ * collection exists to store user metadata, and it follows the same ownership principle.
+ *
+ * Key Security Decisions:
+ * - User Privacy: Listing the contents of any collection is strictly forbidden (allow list: if false).
+ *   This prevents any user from discovering or enumerating other users in the system.
+ * - Path-Based Ownership: Authorization is based on matching the document's ID in the path
+ *   (e.g., {farmerId}) with the requesting user's UID (request.auth.uid). This is simple,
+ *   performant, and secure.
+ * - Relational Integrity: On creation, the rules enforce that a document's internal 'id'
+ *   field must match the document ID. This 'id' field is then enforced as immutable on updates,
+ *   ensuring the link between the user's UID and their data can never be broken.
+ * - Prototyping Flexibility: These rules do not validate the shape or data types of profile
+ *   content (e.g., 'name', 'location'). This allows for rapid iteration on the data model
+ *   while maintaining strict authorization.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ------------------------------------------------------------------------
+    // Helper Functions
+    // ------------------------------------------------------------------------
+
+    /**
+     * Checks if the user is authenticated.
+     */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /**
+     * Checks if the currently authenticated user's UID matches the provided userId.
+     * This is the foundation of the ownership model.
+     */
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /**
+     * Checks if a document currently exists at the path of the request.
+     * Essential for safe updates and deletes.
+     */
+    function isExistingDocument() {
+      return resource != null;
+    }
+
+    /**
+     * Checks for ownership of an existing document. Used for update and delete operations.
+     */
+    function isExistingOwner(userId) {
+      return isOwner(userId) && isExistingDocument();
+    }
+
+    /**
+     * Validates that the incoming document's 'id' field matches its path ID.
+     * Enforces relational integrity on create.
+     */
+    function hasValidIncomingId(docId) {
+      return request.resource.data.id == docId;
+    }
+
+    /**
+     * Validates that the 'id' field of a document is not being changed.
+     * Enforces immutability of the ownership link on update.
+     */
+    function hasImmutableId() {
+      return request.resource.data.id == resource.data.id;
+    }
+
+    /**
+     * Validates a user is creating their own credential document with correct internal IDs.
+     */
+    function isCreatingOwnCredential(credId) {
+      return isOwner(credId) && request.resource.data.id == credId && request.resource.data.userId == credId;
+    }
+
+    /**
+     * Validates a user is updating their own credential and that critical IDs are immutable.
+     */
+    function isUpdatingOwnCredential(credId) {
+      return isExistingOwner(credId) && request.resource.data.id == resource.data.id && request.resource.data.userId == resource.data.userId;
+    }
+
+
+    // ------------------------------------------------------------------------
+    // Collection Rules
+    // ------------------------------------------------------------------------
+
+    /**
+     * @description Controls access to farmer profiles. A user can only manage their own profile.
+     * @path /farmers/{farmerId}
+     * @allow A signed-in user with UID 'farmer_abc' (create) their own profile at /farmers/farmer_abc.
+     * @deny A signed-in user (get) a profile at /farmers/farmer_xyz if their UID is not 'farmer_xyz'.
+     * @principle Restricts access to a user's own data tree and enforces relational integrity.
+     */
+    match /farmers/{farmerId} {
+      allow get: if isOwner(farmerId);
+      allow list: if false;
+      allow create: if isOwner(farmerId) && hasValidIncomingId(farmerId);
+      allow update: if isExistingOwner(farmerId) && hasImmutableId();
+      allow delete: if isExistingOwner(farmerId);
+    }
+
+    /**
+     * @description Controls access to vendor profiles. A user can only manage their own profile.
+     * @path /vendors/{vendorId}
+     * @allow A signed-in user with UID 'vendor_abc' (update) their own profile at /vendors/vendor_abc.
+     * @deny A signed-in user (delete) a profile at /vendors/vendor_xyz if their UID is not 'vendor_xyz'.
+     * @principle Restricts access to a user's own data tree and enforces relational integrity.
+     */
+    match /vendors/{vendorId} {
+      allow get: if isOwner(vendorId);
+      allow list: if false;
+      allow create: if isOwner(vendorId) && hasValidIncomingId(vendorId);
+      allow update: if isExistingOwner(vendorId) && hasImmutableId();
+      allow delete: if isExistingOwner(vendorId);
+    }
+
+    /**
+     * @description Controls access to merchant profiles. A user can only manage their own profile.
+     * @path /merchants/{merchantId}
+     * @allow A signed-in user with UID 'mess_abc' (get) their own profile at /merchants/mess_abc.
+     * @deny An anonymous user (create) a profile at /merchants/mess_xyz.
+     * @principle Restricts access to a user's own data tree and enforces relational integrity.
+     */
+    match /merchants/{merchantId} {
+      allow get: if isOwner(merchantId);
+      allow list: if false;
+      allow create: if isOwner(merchantId) && hasValidIncomingId(merchantId);
+      allow update: if isExistingOwner(merchantId) && hasImmutableId();
+      allow delete: if isExistingOwner(merchantId);
+    }
+
+    /**
+     * @description Controls access to consumer profiles. A user can only manage their own profile.
+     * @path /consumers/{consumerId}
+     * @allow A signed-in user with UID 'student_abc' (create) their own profile at /consumers/student_abc.
+     * @deny Any user (list) the /consumers collection.
+     * @principle Restricts access to a user's own data tree and enforces relational integrity.
+     */
+    match /consumers/{consumerId} {
+      allow get: if isOwner(consumerId);
+      allow list: if false;
+      allow create: if isOwner(consumerId) && hasValidIncomingId(consumerId);
+      allow update: if isExistingOwner(consumerId) && hasImmutableId();
+      allow delete: if isExistingOwner(consumerId);
+    }
+
+    /**
+     * @description Controls access to user credential metadata. A user can only manage their own record.
+     * @path /user_credentials/{credentialId}
+     * @allow A user with UID 'user_xyz' (create) their own record at /user_credentials/user_xyz.
+     * @deny A user with UID 'user_abc' (update) a record at /user_credentials/user_xyz.
+     * @principle Restricts access to a user's own data tree and enforces relational integrity for both 'id' and 'userId' fields.
+     */
+    match /user_credentials/{credentialId} {
+      allow get: if isOwner(credentialId);
+      allow list: if false;
+      allow create: if isCreatingOwnCredential(credentialId);
+      allow update: if isUpdatingOwnCredential(credentialId);
+      allow delete: if isExistingOwner(credentialId);
+    }
+  }
+}
